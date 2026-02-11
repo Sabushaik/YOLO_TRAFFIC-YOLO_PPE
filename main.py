@@ -2,6 +2,8 @@ import os
 import re
 import io
 import time
+import shutil
+import subprocess
 import tempfile
 import logging
 from datetime import datetime, timezone
@@ -39,6 +41,8 @@ S3_OUTPUT_BUCKET = os.getenv("S3_OUTPUT_BUCKET", "spectra-manifacturing-usecase"
 AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
 PRESIGNED_EXPIRY = 7 * 24 * 3600  # 7 days
 MULTIPART_CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB
+FFMPEG_CONVERSION_TIMEOUT = 600  # seconds
+PROGRESS_LOG_INTERVAL = 50  # frames
 
 s3_client = boto3.client("s3", region_name=AWS_REGION)
 
@@ -621,9 +625,6 @@ def postprocess_traffic(output, meta):
 # =========================================================================
 def convert_video_to_web_format(input_path: str, output_path: str) -> bool:
     try:
-        import subprocess
-        import shutil
-
         if not shutil.which('ffmpeg'):
             logger.warning("⚠️ FFmpeg not found, skipping conversion")
             return False
@@ -645,7 +646,7 @@ def convert_video_to_web_format(input_path: str, output_path: str) -> bool:
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=600,
+            timeout=FFMPEG_CONVERSION_TIMEOUT,
             check=False
         )
 
@@ -743,7 +744,7 @@ def _process_ppe_video(video_path: str, output_path: str, frame_skip: int):
         out.write(frame)
         frames_processed += 1
 
-        if frames_processed % 50 == 0:
+        if frames_processed % PROGRESS_LOG_INTERVAL == 0:
             logger.info(f"🔍 PPE processing: {frames_processed}/{total_frames} frames done "
                         f"({len(detected_persons)} persons, {len(ppe_detections)} PPE items in current frame)")
 
@@ -851,7 +852,7 @@ def _process_traffic_video(video_path: str, output_path: str, frame_skip: int):
         out.write(frame)
         frames_processed += 1
 
-        if frames_processed % 50 == 0:
+        if frames_processed % PROGRESS_LOG_INTERVAL == 0:
             logger.info(f"🔍 Traffic processing: {frames_processed}/{total_frames} frames done "
                         f"({len(detections)} detections in current frame)")
 
