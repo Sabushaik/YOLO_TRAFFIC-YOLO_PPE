@@ -1,9 +1,10 @@
 import os
+import re
 import io
 import time
 import tempfile
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Tuple, Optional, Deque
 from collections import deque
 from dataclasses import dataclass, field
@@ -37,6 +38,7 @@ S3_BUCKET = os.getenv("S3_BUCKET", "spectra-manifacturing-usecase")
 S3_OUTPUT_BUCKET = os.getenv("S3_OUTPUT_BUCKET", "spectra-manifacturing-usecase")
 AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
 PRESIGNED_EXPIRY = 7 * 24 * 3600  # 7 days
+MULTIPART_CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB
 
 s3_client = boto3.client("s3", region_name=AWS_REGION)
 
@@ -141,11 +143,10 @@ def _multipart_upload(bucket: str, key: str, file_obj, content_type: str = "vide
     upload_id = mpu["UploadId"]
     parts = []
     part_number = 1
-    chunk_size = 10 * 1024 * 1024  # 10 MB
 
     try:
         while True:
-            chunk = file_obj.read(chunk_size)
+            chunk = file_obj.read(MULTIPART_CHUNK_SIZE)
             if not chunk:
                 break
             resp = s3_client.upload_part(
@@ -162,7 +163,8 @@ def _multipart_upload(bucket: str, key: str, file_obj, content_type: str = "vide
             UploadId=upload_id,
             MultipartUpload={"Parts": parts},
         )
-    except Exception:
+    except Exception as exc:
+        logger.error("Multipart upload failed for %s/%s: %s", bucket, key, exc)
         s3_client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
         raise
 
@@ -178,6 +180,9 @@ def _download_from_s3_or_url(uri: str, dest_path: str):
     else:
         # treat as presigned / direct URL — download via urllib
         import urllib.request
+        parsed = urlparse(uri)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
         urllib.request.urlretrieve(uri, dest_path)
 
 
@@ -770,7 +775,8 @@ async def upload_video(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Only .mp4 files are accepted.")
 
     start = time.time()
-    s3_key = f"uploads/{file.filename}"
+    safe_filename = re.sub(r'[^a-zA-Z0-9._-]', '_', os.path.basename(file.filename))
+    s3_key = f"uploads/{safe_filename}"
 
     try:
         _multipart_upload(S3_BUCKET, s3_key, file.file, content_type="video/mp4")
@@ -841,7 +847,7 @@ async def process_video(req: ProcessVideoRequest):
                 "input_type": input_type,
                 "output_s3_uri": output_s3_uri,
                 "output_presigned_url": output_presigned,
-                "processed_at": datetime.utcnow().isoformat(),
+                "processed_at": datetime.now(timezone.utc).isoformat(),
                 "total_frames": result["total_frames"],
                 "duration_seconds": result["duration_seconds"],
                 "processing_time_seconds": processing_time,
@@ -892,4 +898,4 @@ async def health_check():
 # =========================================================================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8092, workers=4)
+    uvicorn.run("main:app", host=os.getenv("HOST", "0.0.0.0"), port=8092, workers=4)
