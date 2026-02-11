@@ -174,16 +174,18 @@ def _download_from_s3_or_url(uri: str, dest_path: str):
     if uri.startswith("s3://"):
         bucket, key = _parse_s3_uri(uri)
         s3_client.download_file(bucket, key, dest_path)
-    elif "s3" in uri and "amazonaws.com" in uri:
-        bucket, key = _parse_s3_uri(uri)
-        s3_client.download_file(bucket, key, dest_path)
     else:
-        # treat as presigned / direct URL — download via urllib
-        import urllib.request
         parsed = urlparse(uri)
-        if parsed.scheme not in ("http", "https"):
-            raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
-        urllib.request.urlretrieve(uri, dest_path)
+        host = parsed.hostname or ""
+        if host.endswith(".amazonaws.com"):
+            bucket, key = _parse_s3_uri(uri)
+            s3_client.download_file(bucket, key, dest_path)
+        else:
+            # treat as presigned / direct URL — download via urllib
+            import urllib.request
+            if parsed.scheme not in ("http", "https"):
+                raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
+            urllib.request.urlretrieve(uri, dest_path)
 
 
 # =========================================================================
