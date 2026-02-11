@@ -617,6 +617,54 @@ def postprocess_traffic(output, meta):
 
 
 # =========================================================================
+# VIDEO CONVERSION (web-compatible H.264)
+# =========================================================================
+def convert_video_to_web_format(input_path: str, output_path: str) -> bool:
+    try:
+        import subprocess
+        import shutil
+
+        if not shutil.which('ffmpeg'):
+            logger.warning("⚠️ FFmpeg not found, skipping conversion")
+            return False
+
+        command = [
+            'ffmpeg',
+            '-i', input_path,
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-crf', '23',
+            '-movflags', '+faststart',
+            '-pix_fmt', 'yuv420p',
+            '-y',
+            output_path
+        ]
+
+        logger.info("🔄 Converting video to web-compatible format...")
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=600,
+            check=False
+        )
+
+        if result.returncode == 0 and os.path.exists(output_path):
+            logger.info("✅ Video conversion successful")
+            return True
+        else:
+            logger.error(f"❌ FFmpeg conversion failed: {result.stderr.decode()[:200]}")
+            return False
+
+    except subprocess.TimeoutExpired:
+        logger.error("❌ FFmpeg conversion timed out")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Video conversion error: {str(e)}")
+        return False
+
+
+# =========================================================================
 # VIDEO PROCESSING PIPELINES
 # =========================================================================
 def _process_ppe_video(video_path: str, output_path: str, frame_skip: int):
@@ -628,26 +676,42 @@ def _process_ppe_video(video_path: str, output_path: str, frame_skip: int):
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = total_frames / fps if fps > 0 else 0
 
+    logger.info(f"📹 Video info: {W}x{H} @ {fps:.1f}fps, {total_frames} frames, {duration:.1f}s duration")
+    logger.info(f"⚙️ Frame skip: {frame_skip} (processing every {frame_skip + 1} frame(s))")
+
     # Output at original fps for smooth playback
     out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
     client = _get_triton_client()
     tracker = PersonTracker()
 
+    frames_processed = 0
+    frames_skipped = 0
+    extraction_time_total = 0.0
+    inference_time_total = 0.0
+    annotation_time_total = 0.0
+
     last_tracked = []
     for idx in range(total_frames):
+        frame_extract_start = time.time()
         ret, frame = cap.read()
+        extraction_time_total += time.time() - frame_extract_start
         if not ret:
             break
 
         if frame_skip > 0 and idx % (frame_skip + 1) != 0:
             # Use last known annotations for skipped frames
+            annot_start = time.time()
             frame = draw_ppe_annotations(frame, last_tracked, W, H)
+            annotation_time_total += time.time() - annot_start
             out.write(frame)
+            frames_skipped += 1
             continue
 
+        infer_start = time.time()
         img, meta = preprocess(frame)
         output = triton_infer(client, "person_ppe_astec", img)
         dets = postprocess_ppe(output, meta)
+        inference_time_total += time.time() - infer_start
 
         raw_person_boxes, raw_person_scores, ppe_by_class = [], [], {}
         for det in dets:
@@ -671,13 +735,25 @@ def _process_ppe_video(video_path: str, output_path: str, frame_skip: int):
             for i in kp:
                 ppe_detections.append({"box": data["boxes"][i], "name": name, "confidence": data["scores"][i]})
 
+        annot_start = time.time()
         tracked = tracker.update(detected_persons, ppe_detections)
         last_tracked = tracked
         frame = draw_ppe_annotations(frame, tracked, W, H)
+        annotation_time_total += time.time() - annot_start
         out.write(frame)
+        frames_processed += 1
+
+        if frames_processed % 50 == 0:
+            logger.info(f"🔍 PPE processing: {frames_processed}/{total_frames} frames done "
+                        f"({len(detected_persons)} persons, {len(ppe_detections)} PPE items in current frame)")
 
     cap.release()
     out.release()
+
+    logger.info(f"📊 PPE Frame extraction time:  {extraction_time_total:.2f}s")
+    logger.info(f"📊 PPE Detection/inference time: {inference_time_total:.2f}s")
+    logger.info(f"📊 PPE Annotation time:          {annotation_time_total:.2f}s")
+    logger.info(f"📊 PPE Frames processed: {frames_processed}, skipped: {frames_skipped}")
 
     # Build per-person PPE summary from all tracked persons (including expired)
     all_persons = {}
@@ -730,34 +806,62 @@ def _process_traffic_video(video_path: str, output_path: str, frame_skip: int):
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = total_frames / fps if fps > 0 else 0
 
+    logger.info(f"📹 Video info: {W}x{H} @ {fps:.1f}fps, {total_frames} frames, {duration:.1f}s duration")
+    logger.info(f"⚙️ Frame skip: {frame_skip} (processing every {frame_skip + 1} frame(s))")
+
     out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
     client = _get_triton_client()
     tracker = TrafficObjectTracker()
 
+    frames_processed = 0
+    frames_skipped = 0
+    extraction_time_total = 0.0
+    inference_time_total = 0.0
+    annotation_time_total = 0.0
+
     last_tracked = []
     for idx in range(total_frames):
+        frame_extract_start = time.time()
         ret, frame = cap.read()
+        extraction_time_total += time.time() - frame_extract_start
         if not ret:
             break
 
         if frame_skip > 0 and idx % (frame_skip + 1) != 0:
+            annot_start = time.time()
             frame = draw_traffic_annotations(frame, last_tracked, W, H)
             frame = draw_traffic_statistics_panel(frame, tracker, W, H)
+            annotation_time_total += time.time() - annot_start
             out.write(frame)
+            frames_skipped += 1
             continue
 
+        infer_start = time.time()
         img, meta = preprocess(frame)
         output = triton_infer(client, "person_detection_yolo26", img)
         detections = postprocess_traffic(output, meta)
+        inference_time_total += time.time() - infer_start
 
+        annot_start = time.time()
         tracked = tracker.update(detections)
         last_tracked = tracked
         frame = draw_traffic_annotations(frame, tracked, W, H, show_track_id=True)
         frame = draw_traffic_statistics_panel(frame, tracker, W, H)
+        annotation_time_total += time.time() - annot_start
         out.write(frame)
+        frames_processed += 1
+
+        if frames_processed % 50 == 0:
+            logger.info(f"🔍 Traffic processing: {frames_processed}/{total_frames} frames done "
+                        f"({len(detections)} detections in current frame)")
 
     cap.release()
     out.release()
+
+    logger.info(f"📊 Traffic Frame extraction time:  {extraction_time_total:.2f}s")
+    logger.info(f"📊 Traffic Detection/inference time: {inference_time_total:.2f}s")
+    logger.info(f"📊 Traffic Annotation time:          {annotation_time_total:.2f}s")
+    logger.info(f"📊 Traffic Frames processed: {frames_processed}, skipped: {frames_skipped}")
 
     stats = tracker.get_statistics()
     return {
@@ -799,6 +903,14 @@ async def upload_video(file: UploadFile = File(...)):
 @app.post("/process_video")
 async def process_video(req: ProcessVideoRequest):
     """Download video, run detection model, upload annotated video, return JSON summary."""
+    overall_start = time.time()
+    logger.info("=" * 60)
+    logger.info("📥 New /process_video request received")
+    logger.info(f"   Model:      {req.model_id}")
+    logger.info(f"   Video URI:  {req.video_uri}")
+    logger.info(f"   Frame skip: {req.frame_skip}")
+    logger.info("=" * 60)
+
     if req.model_id not in ("person_detection_yolo26", "person_ppe_astec"):
         raise HTTPException(status_code=400, detail="model_id must be 'person_detection_yolo26' or 'person_ppe_astec'.")
     if req.frame_skip < 0:
@@ -807,12 +919,18 @@ async def process_video(req: ProcessVideoRequest):
     with tempfile.TemporaryDirectory() as tmpdir:
         local_video = os.path.join(tmpdir, "input.mp4")
         output_video = os.path.join(tmpdir, "annotated_output.mp4")
+        web_video = os.path.join(tmpdir, "annotated_web.mp4")
 
-        # Download
+        # ── Download ──
+        logger.info("⬇️ Downloading video from URI...")
+        download_start = time.time()
         try:
             _download_from_s3_or_url(req.video_uri, local_video)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to download video: {e}")
+        download_time = round(time.time() - download_start, 2)
+        file_size_mb = round(os.path.getsize(local_video) / (1024 * 1024), 2)
+        logger.info(f"✅ Download complete: {file_size_mb} MB in {download_time}s")
 
         # Determine original filename for output key
         try:
@@ -821,27 +939,56 @@ async def process_video(req: ProcessVideoRequest):
         except Exception:
             base_name = "video"
 
-        # Process
-        start = time.time()
+        # ── Process (detection + annotation) ──
+        logger.info(f"🚀 Starting {req.model_id} processing...")
+        processing_start = time.time()
         if req.model_id == "person_ppe_astec":
             result = _process_ppe_video(local_video, output_video, req.frame_skip)
         else:
             result = _process_traffic_video(local_video, output_video, req.frame_skip)
-        processing_time = round(time.time() - start, 2)
+        processing_time = round(time.time() - processing_start, 2)
+        logger.info(f"✅ Detection & annotation complete in {processing_time}s")
 
-        # Upload annotated video to S3
+        # ── Convert to web-compatible format ──
+        conversion_start = time.time()
+        upload_path = output_video
+        converted = convert_video_to_web_format(output_video, web_video)
+        conversion_time = round(time.time() - conversion_start, 2)
+        if converted:
+            upload_path = web_video
+            logger.info(f"✅ Web conversion complete in {conversion_time}s")
+        else:
+            logger.warning(f"⚠️ Web conversion skipped/failed ({conversion_time}s), uploading original annotated video")
+
+        # ── Upload annotated video to S3 ──
         output_key = f"outputs/{base_name}_annotated.mp4"
+        logger.info(f"⬆️ Uploading annotated video to s3://{S3_OUTPUT_BUCKET}/{output_key} ...")
+        upload_start = time.time()
         try:
-            with open(output_video, "rb") as f:
+            with open(upload_path, "rb") as f:
                 _multipart_upload(S3_OUTPUT_BUCKET, output_key, f, content_type="video/mp4")
         except ClientError as e:
             raise HTTPException(status_code=500, detail=f"Failed to upload annotated video: {e}")
+        upload_time = round(time.time() - upload_start, 2)
+        logger.info(f"✅ Upload complete in {upload_time}s")
 
         output_s3_uri = f"s3://{S3_OUTPUT_BUCKET}/{output_key}"
         output_presigned = _generate_presigned_url(S3_OUTPUT_BUCKET, output_key)
 
         # Determine input type
         input_type = "s3_uri" if req.video_uri.startswith("s3://") else "presigned_url"
+
+        overall_time = round(time.time() - overall_start, 2)
+
+        # ── Timing summary log ──
+        logger.info("=" * 60)
+        logger.info("⏱️ TIMING METRICS SUMMARY")
+        logger.info(f"   Download:        {download_time}s ({file_size_mb} MB)")
+        logger.info(f"   Processing:      {processing_time}s ({result['total_frames']} frames)")
+        logger.info(f"   Web conversion:  {conversion_time}s ({'success' if converted else 'skipped'})")
+        logger.info(f"   S3 Upload:       {upload_time}s")
+        logger.info(f"   ── Total:        {overall_time}s")
+        logger.info("=" * 60)
 
         response = {
             "video_info": {
@@ -853,6 +1000,14 @@ async def process_video(req: ProcessVideoRequest):
                 "total_frames": result["total_frames"],
                 "duration_seconds": result["duration_seconds"],
                 "processing_time_seconds": processing_time,
+            },
+            "timing_metrics": {
+                "download_seconds": download_time,
+                "processing_seconds": processing_time,
+                "web_conversion_seconds": conversion_time,
+                "web_conversion_success": converted,
+                "upload_seconds": upload_time,
+                "overall_seconds": overall_time,
             },
         }
 
