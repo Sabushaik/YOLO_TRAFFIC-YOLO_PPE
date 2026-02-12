@@ -681,7 +681,7 @@ def _process_ppe_video(video_path: str, output_path: str, frame_skip: int):
     logger.info(f"⚙️ Frame skip: {frame_skip} (processing every {frame_skip + 1} frame(s))")
 
     # Adjust output fps so the video duration is preserved when frames are skipped
-    output_fps = fps / (frame_skip + 1) if frame_skip > 0 else fps
+    output_fps = fps / (frame_skip + 1)
     out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), output_fps, (W, H))
     client = _get_triton_client()
     tracker = PersonTracker()
@@ -805,7 +805,7 @@ def _process_traffic_video(video_path: str, output_path: str, frame_skip: int):
     logger.info(f"⚙️ Frame skip: {frame_skip} (processing every {frame_skip + 1} frame(s))")
 
     # Adjust output fps so the video duration is preserved when frames are skipped
-    output_fps = fps / (frame_skip + 1) if frame_skip > 0 else fps
+    output_fps = fps / (frame_skip + 1)
     out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), output_fps, (W, H))
     client = _get_triton_client()
     tracker = TrafficObjectTracker()
