@@ -680,8 +680,9 @@ def _process_ppe_video(video_path: str, output_path: str, frame_skip: int):
     logger.info(f"📹 Video info: {W}x{H} @ {fps:.1f}fps, {total_frames} frames, {duration:.1f}s duration")
     logger.info(f"⚙️ Frame skip: {frame_skip} (processing every {frame_skip + 1} frame(s))")
 
-    # Output at original fps for smooth playback
-    out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
+    # Adjust output fps so the video duration is preserved when frames are skipped
+    output_fps = fps / (frame_skip + 1) if frame_skip > 0 else fps
+    out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), output_fps, (W, H))
     client = _get_triton_client()
     tracker = PersonTracker()
 
@@ -691,7 +692,6 @@ def _process_ppe_video(video_path: str, output_path: str, frame_skip: int):
     inference_time_total = 0.0
     annotation_time_total = 0.0
 
-    last_tracked = []
     for idx in range(total_frames):
         frame_extract_start = time.time()
         ret, frame = cap.read()
@@ -700,11 +700,6 @@ def _process_ppe_video(video_path: str, output_path: str, frame_skip: int):
             break
 
         if frame_skip > 0 and idx % (frame_skip + 1) != 0:
-            # Use last known annotations for skipped frames
-            annot_start = time.time()
-            frame = draw_ppe_annotations(frame, last_tracked, W, H)
-            annotation_time_total += time.time() - annot_start
-            out.write(frame)
             frames_skipped += 1
             continue
 
@@ -738,7 +733,6 @@ def _process_ppe_video(video_path: str, output_path: str, frame_skip: int):
 
         annot_start = time.time()
         tracked = tracker.update(detected_persons, ppe_detections)
-        last_tracked = tracked
         frame = draw_ppe_annotations(frame, tracked, W, H)
         annotation_time_total += time.time() - annot_start
         out.write(frame)
@@ -810,7 +804,9 @@ def _process_traffic_video(video_path: str, output_path: str, frame_skip: int):
     logger.info(f"📹 Video info: {W}x{H} @ {fps:.1f}fps, {total_frames} frames, {duration:.1f}s duration")
     logger.info(f"⚙️ Frame skip: {frame_skip} (processing every {frame_skip + 1} frame(s))")
 
-    out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
+    # Adjust output fps so the video duration is preserved when frames are skipped
+    output_fps = fps / (frame_skip + 1) if frame_skip > 0 else fps
+    out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), output_fps, (W, H))
     client = _get_triton_client()
     tracker = TrafficObjectTracker()
 
@@ -820,7 +816,6 @@ def _process_traffic_video(video_path: str, output_path: str, frame_skip: int):
     inference_time_total = 0.0
     annotation_time_total = 0.0
 
-    last_tracked = []
     for idx in range(total_frames):
         frame_extract_start = time.time()
         ret, frame = cap.read()
@@ -829,11 +824,6 @@ def _process_traffic_video(video_path: str, output_path: str, frame_skip: int):
             break
 
         if frame_skip > 0 and idx % (frame_skip + 1) != 0:
-            annot_start = time.time()
-            frame = draw_traffic_annotations(frame, last_tracked, W, H)
-            frame = draw_traffic_statistics_panel(frame, tracker, W, H)
-            annotation_time_total += time.time() - annot_start
-            out.write(frame)
             frames_skipped += 1
             continue
 
@@ -845,7 +835,6 @@ def _process_traffic_video(video_path: str, output_path: str, frame_skip: int):
 
         annot_start = time.time()
         tracked = tracker.update(detections)
-        last_tracked = tracked
         frame = draw_traffic_annotations(frame, tracked, W, H, show_track_id=True)
         frame = draw_traffic_statistics_panel(frame, tracker, W, H)
         annotation_time_total += time.time() - annot_start
