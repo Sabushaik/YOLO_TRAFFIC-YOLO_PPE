@@ -9,6 +9,7 @@ Requirements:
 """
 
 import os
+import sys
 
 import markdown
 from fpdf import FPDF
@@ -22,26 +23,62 @@ EMOJI_REPLACEMENTS = {
     "\U0001f6a8": "[ALERT]",   # 🚨
 }
 
-# Font paths (DejaVu Sans ships with most Linux distributions)
-FONT_DIR = "/usr/share/fonts/truetype/dejavu"
-FONTS = {
+# Common DejaVu Sans font directories across operating systems
+_FONT_SEARCH_PATHS = [
+    "/usr/share/fonts/truetype/dejavu",          # Debian / Ubuntu
+    "/usr/share/fonts/dejavu-sans-fonts",         # Fedora / RHEL
+    "/usr/share/fonts/dejavu",                    # Arch / openSUSE
+    "/usr/local/share/fonts/dejavu",              # manual install on Linux
+    "/opt/homebrew/share/fonts/dejavu",           # macOS Homebrew (Apple Silicon)
+    "/usr/local/share/fonts",                     # macOS Homebrew (Intel)
+    os.path.expanduser("~/.local/share/fonts"),   # user-level install
+    "C:\\Windows\\Fonts",                          # Windows
+]
+
+# Required font file basenames per family
+_FONT_FILES = {
     "DejaVu": {
-        "": os.path.join(FONT_DIR, "DejaVuSans.ttf"),
-        "B": os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf"),
-        "I": os.path.join(FONT_DIR, "DejaVuSans-Oblique.ttf"),
-        "BI": os.path.join(FONT_DIR, "DejaVuSans-BoldOblique.ttf"),
+        "": "DejaVuSans.ttf",
+        "B": "DejaVuSans-Bold.ttf",
+        "I": "DejaVuSans-Oblique.ttf",
+        "BI": "DejaVuSans-BoldOblique.ttf",
     },
     "DejaVuMono": {
-        "": os.path.join(FONT_DIR, "DejaVuSansMono.ttf"),
-        "B": os.path.join(FONT_DIR, "DejaVuSansMono-Bold.ttf"),
-        "I": os.path.join(FONT_DIR, "DejaVuSansMono-Oblique.ttf"),
-        "BI": os.path.join(FONT_DIR, "DejaVuSansMono-BoldOblique.ttf"),
+        "": "DejaVuSansMono.ttf",
+        "B": "DejaVuSansMono-Bold.ttf",
+        "I": "DejaVuSansMono-Oblique.ttf",
+        "BI": "DejaVuSansMono-BoldOblique.ttf",
     },
 }
 
 
+def _find_font_dir():
+    """Return the first directory that contains all required font files."""
+    required = {name for styles in _FONT_FILES.values() for name in styles.values()}
+    for directory in _FONT_SEARCH_PATHS:
+        if os.path.isdir(directory) and required.issubset(os.listdir(directory)):
+            return directory
+    return None
+
+
 def generate_pdf(md_path="README.md", output_path="README.pdf"):
     """Read a Markdown file and write it as a PDF."""
+    if not os.path.isfile(md_path):
+        print(f"Error: Markdown file not found: {md_path}", file=sys.stderr)
+        sys.exit(1)
+
+    font_dir = _find_font_dir()
+    if font_dir is None:
+        print(
+            "Error: DejaVu Sans fonts not found. Install them with:\n"
+            "  Debian/Ubuntu: sudo apt install fonts-dejavu-core\n"
+            "  Fedora/RHEL:   sudo dnf install dejavu-sans-fonts\n"
+            "  macOS:         brew install font-dejavu\n"
+            "  Windows:       download from https://dejavu-fonts.github.io/",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     with open(md_path, "r", encoding="utf-8") as f:
         md_text = f.read()
 
@@ -58,9 +95,9 @@ def generate_pdf(md_path="README.md", output_path="README.pdf"):
     pdf.add_page()
 
     # Register Unicode-capable fonts
-    for family, styles in FONTS.items():
-        for style, path in styles.items():
-            pdf.add_font(family, style, path)
+    for family, styles in _FONT_FILES.items():
+        for style, filename in styles.items():
+            pdf.add_font(family, style, os.path.join(font_dir, filename))
 
     pdf.set_font("DejaVu", size=12)
 
