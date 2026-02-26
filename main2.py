@@ -8,7 +8,7 @@ import tempfile
 import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple, Optional, Deque
-from collections import deque
+from collections import deque, Counter
 from dataclasses import dataclass, field
 from urllib.parse import urlparse, unquote
 
@@ -292,6 +292,7 @@ class PersonTracker:
     def __init__(self):
         self.tracked_persons: Dict[int, TrackedPerson] = {}
         self.next_id = 0
+        self.per_frame_person_counts: List[int] = []
 
     def _iou(self, boxA, boxB):
         xA, yA = max(boxA[0], boxB[0]), max(boxA[1], boxB[1])
@@ -349,10 +350,16 @@ class PersonTracker:
                 self.next_id += 1
 
         self._associate_ppe(ppe_detections)
+        self.per_frame_person_counts.append(len(detected_persons))
         expired = [tid for tid, p in self.tracked_persons.items() if p.is_expired()]
         for tid in expired:
             del self.tracked_persons[tid]
         return [p for p in self.tracked_persons.values() if p.frames_missing == 0]
+
+    def get_mode_person_count(self):
+        if not self.per_frame_person_counts:
+            return 0
+        return Counter(self.per_frame_person_counts).most_common(1)[0][0]
 
     def _associate_ppe(self, ppe_detections):
         person_observed_ppe = {tid: set() for tid in self.tracked_persons}
@@ -469,6 +476,7 @@ class TrafficObjectTracker:
         self.next_id = 0
         self.frame_count = 0
         self.class_statistics: Dict[str, int] = {cls: 0 for cls in TRAFFIC_CLASSES.values()}
+        self.per_frame_class_counts: Dict[str, List[int]] = {cls: [] for cls in TRAFFIC_CLASSES.values()}
 
     def _iou(self, boxA, boxB):
         xA, yA = max(boxA[0], boxB[0]), max(boxA[1], boxB[1])
@@ -513,13 +521,29 @@ class TrafficObjectTracker:
         expired = [tid for tid, o in self.tracked_objects.items() if o.is_expired()]
         for tid in expired:
             del self.tracked_objects[tid]
-        return [o for o in self.tracked_objects.values() if o.frames_missing == 0]
+        active = [o for o in self.tracked_objects.values() if o.frames_missing == 0]
+        frame_counts = {}
+        for o in active:
+            frame_counts[o.object_class] = frame_counts.get(o.object_class, 0) + 1
+        for cls in self.per_frame_class_counts:
+            self.per_frame_class_counts[cls].append(frame_counts.get(cls, 0))
+        return active
+
+    def get_mode_class_counts(self):
+        mode_counts = {}
+        for cls, counts in self.per_frame_class_counts.items():
+            if counts:
+                mode_counts[cls] = Counter(counts).most_common(1)[0][0]
+            else:
+                mode_counts[cls] = 0
+        return mode_counts
 
     def get_statistics(self):
         return {
             "total_tracked": self.next_id,
             "currently_active": len([o for o in self.tracked_objects.values() if o.frames_missing == 0]),
             "class_counts": self.class_statistics.copy(),
+            "mode_class_counts": self.get_mode_class_counts(),
         }
 
 
@@ -545,6 +569,7 @@ def draw_traffic_annotations(frame, tracked_objects, fw, fh, show_track_id=True)
 
 def draw_traffic_statistics_panel(frame, tracker, fw, fh):
     stats = tracker.get_statistics()
+    mode_counts = stats["mode_class_counts"]
     panel_width = 350
     panel_x = fw - panel_width - 10
     panel_y = 10
@@ -554,11 +579,12 @@ def draw_traffic_statistics_panel(frame, tracker, fw, fh):
         f"Frame: {tracker.frame_count}",
         f"Active Objects: {stats['currently_active']}",
         f"Total Tracked: {stats['total_tracked']}",
-        "--- Class Counts ---"
+        "--- Class Counts (Mode) ---"
     ]
     for cls, count in sorted(stats["class_counts"].items(), key=lambda x: x[1], reverse=True):
         if count > 0:
-            lines.append(f"{cls}: {count}")
+            mode_val = mode_counts.get(cls, 0)
+            lines.append(f"{cls}: {count} (mode: {mode_val})")
     panel_height = len(lines) * line_height + 20
     overlay = frame.copy()
     cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_width, panel_y + panel_height), (0, 0, 0), -1)
@@ -779,10 +805,13 @@ def _process_ppe_video(video_path: str, output_path: str, frame_skip: int):
         if status.get("shoes"):
             ppe_summary["safety_shoes"] += 1
 
+    mode_persons = tracker.get_mode_person_count()
+
     return {
         "total_frames": total_frames,
         "duration_seconds": round(duration, 1),
         "unique_counts": {"persons": unique_persons},
+        "mode_persons_per_frame": mode_persons,
         "per_person_ppe_summary": per_person_ppe,
         "ppe_summary": ppe_summary,
     }
@@ -853,6 +882,7 @@ def _process_traffic_video(video_path: str, output_path: str, frame_skip: int):
         "total_frames": total_frames,
         "duration_seconds": round(duration, 1),
         "class_counts": stats["class_counts"],
+        "mode_class_counts": stats["mode_class_counts"],
     }
 
 
@@ -998,10 +1028,12 @@ async def process_video(req: ProcessVideoRequest):
 
         if req.model_id == "person_ppe_astec":
             response["unique_counts"] = result["unique_counts"]
+            response["mode_persons_per_frame"] = result["mode_persons_per_frame"]
             response["per_person_ppe_summary"] = result["per_person_ppe_summary"]
             response["ppe_summary"] = result["ppe_summary"]
         else:
             response["class_counts"] = result["class_counts"]
+            response["mode_class_counts"] = result["mode_class_counts"]
 
     return response
 
